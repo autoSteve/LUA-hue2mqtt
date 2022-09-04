@@ -13,6 +13,3 @@ Utilises the latest Philips V2 REST API, and a topic structure aiming to be iden
 Some limitations:
 - Only on/off and brightness set/lights/ commands are implemented
 - Hue and saturation are not implemented for status topics
-
-Related repository
-- https://github.com/autoSteve/acMqtt (CBus integration with Philips Hue, Home Assistant and ESPhome devices)
