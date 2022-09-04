@@ -4,16 +4,28 @@ mqttUsername = 'mqtt'
 mqttPassword = 'password'
 
 --[[
-Hue2mqtt, resident sleep zero
-
 Gateway between a Philips Hue bridge and MQTT
-Copyright 2022 Steve Saunders
 
-An alternative to https://github.com/owagner/hue2mqtt or https://github.com/hobbyquaker/hue2mqtt.js/
+Script: Hue2mqtt, resident zero sleep
 
-Utilises the Philips V2 REST API, and a topic structure aiming to be identical to its alternatives.
+An alternative to https://github.com/owagner/hue2mqtt or https://github.com/hobbyquaker/hue2mqtt.js/ running
+directly on a CBus Automation Controller.
+
+Utilises the latest Philips V2 REST API, and a topic structure aiming to be identical to its alternatives, so
+should be a drop-in replacement. The alternatives are quite dated, and make use of a deprecated Philips Hue API
+that is no longer maintained.
+
+Some limitations:
+- Only on/off and brightness set/lights/ commands are implemented
+- Hue and saturation are not implemented for status topics
+
+Copyright 2022, by Steve Saunders
+Permission to use/modify freely is granted, and acknowledging the author or sending beer would be nice.
 --]]
 
+
+logging = false             -- Enable detailed logging
+logms = false               -- Include timestamp in milliseconds for logs
 
 hueTopic = 'hue/'
 hueSetTopic = hueTopic..'set/lights/'
@@ -22,8 +34,6 @@ resource = '/clip/v2/resource'
 mqttClientId = 'achue2mqtt' -- Unique client ID to use for the broker
 mqttQoS = 2                 -- Quality of service for MQTT messages: 0 = only once, 1 = at least once, 2 = exactly once
 socketTimeout = 0.01        -- Lower = higher CPU
-logging = false             -- Enable detailed logging
-logms = false               -- Include timestamp in milliseconds for logs
 
 port = 443
 protocol = 'tlsv12'
@@ -39,58 +49,48 @@ mqttTimeout = 0             -- In milliseconds, go with zero unless you know wha
 RETAIN = true               -- Boolean aliases for MQTT retain and no-retain settings
 NORETAIN = false
 
-appkey = nil
-
-
 started = socket.gettime(); function logger(msg) if logms then ts = string.format('%.3f ', socket.gettime()-started) else ts = '' end log(ts..msg) end -- Log helper
+
+
+--[[
+Calculate an approximated mired color temperature from XY
+--]]
+
 function CTfromCCT(cct) if cct > 6500.0 then return math.floor(2000 / 13 + 0.5) elseif cct < 2000.0 then return 500 end return math.floor(1000000 / cct + 0.5) end
 function CCTfromXY(x, y) local n = (x - 0.3320) / (0.1858 - y); return 437*n^3 + 3601*n^2 + 6861*n + 5517 end
 function CTfromXY(x, y) return CTfromCCT(CCTfromXY(x, y)) end
 
   
 --[[
-Set up the Hue connection
+Representational state transfer (REST) 
 --]]
 
-require('ssl')
-sock = require('socket').tcp()
-http = require'socket.http'
+local http = require'socket.http'
 local ltn12 = require('ltn12')
 
 function rest(method, cmd, body)
   if not body then body = '' end
   local respbody = {}
-  local headers = {
-    ["content-length"] = tostring(#body)
-  }
-  if appkey ~= nil then headers['hue-application-key'] = appkey end
+  local headers = {["content-length"] = tostring(#body)}
+  if clientKey ~= nil then headers['hue-application-key'] = clientKey end
   local result, respcode, respheaders, respstatus = http.request {
-      method = method,
-      url = 'https://'..bridge..cmd,
-      source = ltn12.source.string(body),
-      headers = {
-          ['hue-application-key'] = appkey,
-          ["content-length"] = tostring(#body)
-      },
-      sink = ltn12.sink.table(respbody)
+    method = method,
+    url = 'https://'..bridge..cmd,
+    source = ltn12.source.string(body),
+    headers = headers,
+    sink = ltn12.sink.table(respbody)
   }
   if respcode ~= 200 then log('Error: Received response '..respcode..' requesting '..cmd) end
   return table.concat(respbody)
 end
 
-function send(t, accept, cmd, payload)
-  local toSend
-  if not payload then
-    toSend = t..' '..cmd..' HTTP/1.1\nHost: '..bridge..'\nAccept: '..accept..'\nhue-application-key: '..appkey..'\n\n'
-  else
-    toSend = t..' '..cmd..' HTTP/1.1\nHost: '..bridge..'\nAccept: '..accept..'\nhue-application-key: '..appkey..'\n\n'..payload..'\n'
-  end
-  sock:send(toSend)
-end
 
+--[[
+Retrieve or create the client key 
+--]]
 
-appkey = storage.get(mqttClientId)
-if appkey == nil then
+clientKey = storage.get(mqttClientId)
+if clientKey == nil then
   logger('Press the Hue bridge link button')
   repeat
     response = json.decode(rest('POST', '/api', '{"devicetype":"cbus#ac", "generateclientkey": true}'))[1]
@@ -99,10 +99,14 @@ if appkey == nil then
       socket.sleep(5)
     end
   until response.success
-  appkey = response.success.username
-  storage.set(mqttClientId, appkey)
+  clientKey = response.success.username
+  storage.set(mqttClientId, clientKey)
 end
 
+
+--[[
+Load lighting devices from the bridge
+--]]
 
 function getResources()
   l = rest('GET', resource)
@@ -142,6 +146,13 @@ function getResources()
 end
 
 
+--[[
+Connect to the bridge and initiate event stream 
+--]]
+
+require('ssl')
+sock = require('socket').tcp()
+
 res, err = sock:connect(bridge, port)
 if res then
   sock = ssl.wrap(sock, protocol)
@@ -150,58 +161,21 @@ if res then
     logger('Connected to Philips Hue bridge')
     sock:settimeout(socketTimeout)
     getResources()
-    send('GET', 'text/event-stream', eventstream)
+    sock:send('GET '..eventstream..' HTTP/1.1\nHost: '..bridge..'\nAccept: text/event-stream\nhue-application-key: '..clientKey..'\n\n')
   else
-    logger('Handshake failed: ' .. tostring(err))
+    logger('Handshake failed: '..tostring(err))
     sock:close()
     do return end
   end
 else
-  logger('Connect failed: ' .. tostring(err))
+  logger('Connect failed: '..tostring(err))
   sock:close()
   do return end
 end
 
 
 --[[
-Publish status/lights/ topics 
---]]
-
-function publish(device, d)
-  local payload
-  if d.brightness then
-    local level = d.level; if level == 255 then level = 254 end
-    payload = {
-      val = d.on and d.level or 0,
-      hue_state = {
-        on = d.on,
-        bri = level,
-        effect = d.effect,
-        xy = d.xy,
-        ct = d.ct,
-        hue = nil, -- To do
-        sat = nil, -- To do
-        colormode = d.colormode,
-        alert = 'select',
-        reachable = d.reachable,
-      }
-    }
-  else
-    payload = {
-      val = d.on,
-      hue_state = {
-        on = d.on,
-        alert = 'select',
-        reachable = d.reachable,
-      }
-    }
-  end
-  local j = json.encode(payload)
-  client:publish(hueTopic..'status/lights/'..d.name, j, mqttQoS, RETAIN)
-end
-
---[[
-Mosquitto client and call-backs 
+Set up the mosquitto client and call-backs 
 --]]
 
 mqtt = require('mosquitto')
@@ -218,7 +192,7 @@ client.ON_CONNECT = function(success)
     client:subscribe(hueSetTopic..'#', mqttQoS)
  
     -- Full publish status topics
-    for device, d in pairs(devices) do publish(device, d) end
+    for device, d in pairs(devices) do publish(d) end
   end
 end
 
@@ -233,7 +207,7 @@ end
 
 
 --[[
-Publish queued messages - TODO ... Only handles on and brightness
+Publish queued messages to Hue bridge - TODO ... Only handles on/off and brightness. More?
 --]]
 function outstandingMqttMessage()
   -- Send set messages to Hue API
@@ -263,11 +237,51 @@ end
 
 
 --[[
+Publish status/lights/ topics to MQTT broker
+--]]
+
+function publish(device)
+  local payload
+  if device.brightness then
+    local level = device.level; if level == 255 then level = 254 end
+    payload = {
+      val = device.on and device.level or 0,
+      hue_state = {
+        on = device.on,
+        bri = level,
+        effect = device.effect,
+        xy = device.xy,
+        ct = device.ct,
+        hue = device.hue,
+        sat = device.sat,
+        colormode = device.colormode,
+        alert = 'select',
+        reachable = device.reachable,
+      }
+    }
+  else
+    payload = {
+      val = device.on,
+      hue_state = {
+        on = device.on,
+        alert = 'select',
+        reachable = device.reachable,
+      }
+    }
+  end
+  local j = json.encode(payload)
+  client:publish(hueTopic..'status/lights/'..device.name, j, mqttQoS, RETAIN)
+end
+
+
+--[[
 Main loop
 --]]
 
 while true do
-  repeat -- Process the entire read buffer
+  -- Read the event stream
+  -- Processes the entire read buffer each iteration
+  repeat
     local line, err = sock:receive()
     sock:settimeout(0)
 
@@ -305,7 +319,7 @@ while true do
                     end
                     -- Publish update
                     if update then
-                      publish(id, devices[id])
+                      publish(devices[id])
                     end
                   end
                 end
@@ -338,7 +352,5 @@ while true do
     -- MQTT is disconnected, so attempt a connection every five seconds
     mqttConnected = os.time()
     client:connect(mqttBroker, 1883, 25) -- Requested keep-alive 25 seconds, broker at port 1883
-
-    local time = socket.gettime() while socket.gettime() - time < 2 do client:loop(0) end -- Allow some settling time for subscriptions with retain flag
   end
 end
