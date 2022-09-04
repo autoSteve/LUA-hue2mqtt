@@ -1,6 +1,7 @@
 # LUA-hue2mqtt
 
-Gateway between a Philips Hue bridge and MQTT, written in LUA
+Gateway between a Philips Hue bridge and MQTT, written in LUA.
+
 Copyright 2022 Steve Saunders
 
 Script: Hue2mqtt, resident zero sleep
